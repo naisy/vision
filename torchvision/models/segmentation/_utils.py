@@ -31,7 +31,7 @@ class _SimpleSegmentationModel(nn.Module):
             print('FCN model input size = ' + str(input_shape))
             print('FCN classifier output size = ' + str(x.size()))
    
-            x = F.interpolate(x, size=(int(input_shape[0]), int(input_shape[1])), mode='nearest')
+            #x = F.interpolate(x, size=(int(input_shape[0]), int(input_shape[1])), mode='nearest')
 
             print('FCN upsample() output size = ' + str(x.size()))
             print('FCN => returning tensor instead of OrderedDict')
