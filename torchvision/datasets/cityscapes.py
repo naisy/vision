@@ -163,11 +163,14 @@ class Cityscapes(VisionDataset):
 
         target = tuple(targets) if len(targets) > 1 else targets[0]
 
-        if self.transform:
-            image = self.transform(image)
+        # https://github.com/pytorch/vision/commit/ec203153095ad3d2e79fbf2865d80fe6076618fa#diff-68099ead7afd1bf1af7e59f21e02e75a
+        #if self.transform:
+        #    image = self.transform(image)
 
-        if self.target_transform:
-            target = self.target_transform(target)
+        #if self.target_transform:
+        #    target = self.target_transform(target)
+        if self.transform is not None:
+            image, target = self.transform(image, target)
 
         return image, target
 
