@@ -1,23 +1,15 @@
-from __future__ import division
 import torch
-import sys
 import math
-from PIL import Image, ImageOps, ImageEnhance, PILLOW_VERSION
+from PIL import Image, ImageOps, ImageEnhance, __version__ as PILLOW_VERSION
 try:
     import accimage
 except ImportError:
     accimage = None
 import numpy as np
+from numpy import sin, cos, tan
 import numbers
-import collections
+from collections.abc import Sequence, Iterable
 import warnings
-
-if sys.version_info < (3, 3):
-    Sequence = collections.Sequence
-    Iterable = collections.Iterable
-else:
-    Sequence = collections.abc.Sequence
-    Iterable = collections.abc.Iterable
 
 
 def _is_pil_image(img):
@@ -27,12 +19,12 @@ def _is_pil_image(img):
         return isinstance(img, Image.Image)
 
 
-def _is_tensor_image(img):
-    return torch.is_tensor(img) and img.ndimension() == 3
+def _is_numpy(img):
+    return isinstance(img, np.ndarray)
 
 
 def _is_numpy_image(img):
-    return isinstance(img, np.ndarray) and (img.ndim in {2, 3})
+    return img.ndim in {2, 3}
 
 
 def to_tensor(pic):
@@ -46,8 +38,11 @@ def to_tensor(pic):
     Returns:
         Tensor: Converted image.
     """
-    if not(_is_pil_image(pic) or _is_numpy_image(pic)):
+    if not(_is_pil_image(pic) or _is_numpy(pic)):
         raise TypeError('pic should be PIL Image or ndarray. Got {}'.format(type(pic)))
+
+    if _is_numpy(pic) and not _is_numpy_image(pic):
+        raise ValueError('pic should be 2/3 dimensional. Got {} dimensions.'.format(pic.ndim))
 
     if isinstance(pic, np.ndarray):
         # handle numpy array
@@ -77,17 +72,10 @@ def to_tensor(pic):
         img = 255 * torch.from_numpy(np.array(pic, np.uint8, copy=False))
     else:
         img = torch.ByteTensor(torch.ByteStorage.from_buffer(pic.tobytes()))
-    # PIL image mode: L, LA, P, I, F, RGB, YCbCr, RGBA, CMYK
-    if pic.mode == 'YCbCr':
-        nchannel = 3
-    elif pic.mode == 'I;16':
-        nchannel = 1
-    else:
-        nchannel = len(pic.mode)
-    img = img.view(pic.size[1], pic.size[0], nchannel)
+
+    img = img.view(pic.size[1], pic.size[0], len(pic.getbands()))
     # put it from HWC to CHW format
-    # yikes, this transpose takes 80% of the loading time/CPU
-    img = img.transpose(0, 1).transpose(0, 2).contiguous()
+    img = img.permute((2, 0, 1)).contiguous()
     if isinstance(img, torch.ByteTensor):
         return img.float().div(255)
     else:
@@ -128,7 +116,7 @@ def to_pil_image(pic, mode=None):
             pic = np.expand_dims(pic, 2)
 
     npimg = pic
-    if isinstance(pic, torch.FloatTensor):
+    if isinstance(pic, torch.FloatTensor) and mode != 'F':
         pic = pic.mul(255).byte()
     if isinstance(pic, torch.Tensor):
         npimg = np.transpose(pic.numpy(), (1, 2, 0))
@@ -193,19 +181,31 @@ def normalize(tensor, mean, std, inplace=False):
         tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
         mean (sequence): Sequence of means for each channel.
         std (sequence): Sequence of standard deviations for each channel.
+        inplace(bool,optional): Bool to make this operation inplace.
 
     Returns:
         Tensor: Normalized Tensor image.
     """
-    if not _is_tensor_image(tensor):
-        raise TypeError('tensor is not a torch image.')
+    if not torch.is_tensor(tensor):
+        raise TypeError('tensor should be a torch tensor. Got {}.'.format(type(tensor)))
+
+    if tensor.ndimension() != 3:
+        raise ValueError('Expected tensor to be a tensor image of size (C, H, W). Got tensor.size() = '
+                         '{}.'.format(tensor.size()))
 
     if not inplace:
         tensor = tensor.clone()
 
-    mean = torch.as_tensor(mean, dtype=torch.float32, device=tensor.device)
-    std = torch.as_tensor(std, dtype=torch.float32, device=tensor.device)
-    tensor.sub_(mean[:, None, None]).div_(std[:, None, None])
+    dtype = tensor.dtype
+    mean = torch.as_tensor(mean, dtype=dtype, device=tensor.device)
+    std = torch.as_tensor(std, dtype=dtype, device=tensor.device)
+    if (std == 0).any():
+        raise ValueError('std evaluated to zero after conversion to {}, leading to division by zero.'.format(dtype))
+    if mean.ndim == 1:
+        mean = mean[:, None, None]
+    if std.ndim == 1:
+        std = std[:, None, None]
+    tensor.sub_(mean).div_(std)
     return tensor
 
 
@@ -340,15 +340,15 @@ def pad(img, padding, fill=0, padding_mode='constant'):
         return Image.fromarray(img)
 
 
-def crop(img, i, j, h, w):
+def crop(img, top, left, height, width):
     """Crop the given PIL Image.
 
     Args:
-        img (PIL Image): Image to be cropped.
-        i (int): i in (i,j) i.e coordinates of the upper left corner.
-        j (int): j in (i,j) i.e coordinates of the upper left corner.
-        h (int): Height of the cropped image.
-        w (int): Width of the cropped image.
+        img (PIL Image): Image to be cropped. (0,0) denotes the top left corner of the image.
+        top (int): Vertical component of the top left corner of the crop box.
+        left (int): Horizontal component of the top left corner of the crop box.
+        height (int): Height of the crop box.
+        width (int): Width of the crop box.
 
     Returns:
         PIL Image: Cropped image.
@@ -356,30 +356,39 @@ def crop(img, i, j, h, w):
     if not _is_pil_image(img):
         raise TypeError('img should be PIL Image. Got {}'.format(type(img)))
 
-    return img.crop((j, i, j + w, i + h))
+    return img.crop((left, top, left + width, top + height))
 
 
 def center_crop(img, output_size):
+    """Crop the given PIL Image and resize it to desired size.
+
+    Args:
+        img (PIL Image): Image to be cropped. (0,0) denotes the top left corner of the image.
+        output_size (sequence or int): (height, width) of the crop box. If int,
+            it is used for both directions
+    Returns:
+        PIL Image: Cropped image.
+    """
     if isinstance(output_size, numbers.Number):
         output_size = (int(output_size), int(output_size))
-    w, h = img.size
-    th, tw = output_size
-    i = int(round((h - th) / 2.))
-    j = int(round((w - tw) / 2.))
-    return crop(img, i, j, th, tw)
+    image_width, image_height = img.size
+    crop_height, crop_width = output_size
+    crop_top = int(round((image_height - crop_height) / 2.))
+    crop_left = int(round((image_width - crop_width) / 2.))
+    return crop(img, crop_top, crop_left, crop_height, crop_width)
 
 
-def resized_crop(img, i, j, h, w, size, interpolation=Image.BILINEAR):
+def resized_crop(img, top, left, height, width, size, interpolation=Image.BILINEAR):
     """Crop the given PIL Image and resize it to desired size.
 
     Notably used in :class:`~torchvision.transforms.RandomResizedCrop`.
 
     Args:
-        img (PIL Image): Image to be cropped.
-        i (int): i in (i,j) i.e coordinates of the upper left corner
-        j (int): j in (i,j) i.e coordinates of the upper left corner
-        h (int): Height of the cropped image.
-        w (int): Width of the cropped image.
+        img (PIL Image): Image to be cropped. (0,0) denotes the top left corner of the image.
+        top (int): Vertical component of the top left corner of the crop box.
+        left (int): Horizontal component of the top left corner of the crop box.
+        height (int): Height of the crop box.
+        width (int): Width of the crop box.
         size (sequence or int): Desired output size. Same semantics as ``resize``.
         interpolation (int, optional): Desired interpolation. Default is
             ``PIL.Image.BILINEAR``.
@@ -387,7 +396,7 @@ def resized_crop(img, i, j, h, w, size, interpolation=Image.BILINEAR):
         PIL Image: Cropped image.
     """
     assert _is_pil_image(img), 'img should be PIL Image'
-    img = crop(img, i, j, h, w)
+    img = crop(img, top, left, height, width)
     img = resize(img, size, interpolation)
     return img
 
@@ -405,6 +414,43 @@ def hflip(img):
         raise TypeError('img should be PIL Image. Got {}'.format(type(img)))
 
     return img.transpose(Image.FLIP_LEFT_RIGHT)
+
+
+def _parse_fill(fill, img, min_pil_version):
+    """Helper function to get the fill color for rotate and perspective transforms.
+
+    Args:
+        fill (n-tuple or int or float): Pixel fill value for area outside the transformed
+            image. If int or float, the value is used for all bands respectively.
+            Defaults to 0 for all bands.
+        img (PIL Image): Image to be filled.
+        min_pil_version (str): The minimum PILLOW version for when the ``fillcolor`` option
+            was first introduced in the calling function. (e.g. rotate->5.2.0, perspective->5.0.0)
+
+    Returns:
+        dict: kwarg for ``fillcolor``
+    """
+    major_found, minor_found = (int(v) for v in PILLOW_VERSION.split('.')[:2])
+    major_required, minor_required = (int(v) for v in min_pil_version.split('.')[:2])
+    if major_found < major_required or (major_found == major_required and minor_found < minor_required):
+        if fill is None:
+            return {}
+        else:
+            msg = ("The option to fill background area of the transformed image, "
+                   "requires pillow>={}")
+            raise RuntimeError(msg.format(min_pil_version))
+
+    num_bands = len(img.getbands())
+    if fill is None:
+        fill = 0
+    if isinstance(fill, (int, float)) and num_bands > 1:
+        fill = tuple([fill] * num_bands)
+    if not isinstance(fill, (int, float)) and len(fill) != num_bands:
+        msg = ("The number of elements in 'fill' does not match the number of "
+               "bands of the image ({} != {})")
+        raise ValueError(msg.format(len(fill), num_bands))
+
+    return {"fillcolor": fill}
 
 
 def _get_perspective_coeffs(startpoints, endpoints):
@@ -428,26 +474,33 @@ def _get_perspective_coeffs(startpoints, endpoints):
 
     A = torch.tensor(matrix, dtype=torch.float)
     B = torch.tensor(startpoints, dtype=torch.float).view(8)
-    res = torch.gels(B, A)[0]
+    res = torch.lstsq(B, A)[0]
     return res.squeeze_(1).tolist()
 
 
-def perspective(img, startpoints, endpoints, interpolation=Image.BICUBIC):
+def perspective(img, startpoints, endpoints, interpolation=Image.BICUBIC, fill=None):
     """Perform perspective transform of the given PIL Image.
 
     Args:
         img (PIL Image): Image to be transformed.
-        coeffs (tuple) : 8-tuple (a, b, c, d, e, f, g, h) which contains the coefficients.
-                            for a perspective transform.
+        startpoints: List containing [top-left, top-right, bottom-right, bottom-left] of the orignal image
+        endpoints: List containing [top-left, top-right, bottom-right, bottom-left] of the transformed image
         interpolation: Default- Image.BICUBIC
+        fill (n-tuple or int or float): Pixel fill value for area outside the rotated
+            image. If int or float, the value is used for all bands respectively.
+            This option is only available for ``pillow>=5.0.0``.
+
     Returns:
         PIL Image:  Perspectively transformed Image.
     """
+
     if not _is_pil_image(img):
         raise TypeError('img should be PIL Image. Got {}'.format(type(img)))
 
+    opts = _parse_fill(fill, img, '5.0.0')
+
     coeffs = _get_perspective_coeffs(startpoints, endpoints)
-    return img.transform(img.size, Image.PERSPECTIVE, coeffs, interpolation)
+    return img.transform(img.size, Image.PERSPECTIVE, coeffs, interpolation, **opts)
 
 
 def vflip(img):
@@ -486,37 +539,40 @@ def five_crop(img, size):
     else:
         assert len(size) == 2, "Please provide only two dimensions (h, w) for size."
 
-    w, h = img.size
-    crop_h, crop_w = size
-    if crop_w > w or crop_h > h:
-        raise ValueError("Requested crop size {} is bigger than input size {}".format(size,
-                                                                                      (h, w)))
-    tl = img.crop((0, 0, crop_w, crop_h))
-    tr = img.crop((w - crop_w, 0, w, crop_h))
-    bl = img.crop((0, h - crop_h, crop_w, h))
-    br = img.crop((w - crop_w, h - crop_h, w, h))
-    center = center_crop(img, (crop_h, crop_w))
+    image_width, image_height = img.size
+    crop_height, crop_width = size
+    if crop_width > image_width or crop_height > image_height:
+        msg = "Requested crop size {} is bigger than input size {}"
+        raise ValueError(msg.format(size, (image_height, image_width)))
+
+    tl = img.crop((0, 0, crop_width, crop_height))
+    tr = img.crop((image_width - crop_width, 0, image_width, crop_height))
+    bl = img.crop((0, image_height - crop_height, crop_width, image_height))
+    br = img.crop((image_width - crop_width, image_height - crop_height,
+                   image_width, image_height))
+    center = center_crop(img, (crop_height, crop_width))
     return (tl, tr, bl, br, center)
 
 
 def ten_crop(img, size, vertical_flip=False):
-    r"""Crop the given PIL Image into four corners and the central crop plus the
-        flipped version of these (horizontal flipping is used by default).
+    """Generate ten cropped images from the given PIL Image.
+    Crop the given PIL Image into four corners and the central crop plus the
+    flipped version of these (horizontal flipping is used by default).
 
     .. Note::
         This transform returns a tuple of images and there may be a
         mismatch in the number of inputs and targets your ``Dataset`` returns.
 
     Args:
-       size (sequence or int): Desired output size of the crop. If size is an
+        size (sequence or int): Desired output size of the crop. If size is an
             int instead of sequence like (h, w), a square crop (size, size) is
             made.
-       vertical_flip (bool): Use vertical flipping instead of horizontal
+        vertical_flip (bool): Use vertical flipping instead of horizontal
 
     Returns:
-       tuple: tuple (tl, tr, bl, br, center, tl_flip, tr_flip, bl_flip, br_flip, center_flip)
-                Corresponding top left, top right, bottom left, bottom right and center crop
-                and same for the flipped image.
+        tuple: tuple (tl, tr, bl, br, center, tl_flip, tr_flip, bl_flip, br_flip, center_flip)
+            Corresponding top left, top right, bottom left, bottom right and
+            center crop and same for the flipped image.
     """
     if isinstance(size, numbers.Number):
         size = (int(size), int(size))
@@ -677,7 +733,7 @@ def adjust_gamma(img, gamma, gain=1):
     return img
 
 
-def rotate(img, angle, resample=False, expand=False, center=None):
+def rotate(img, angle, resample=False, expand=False, center=None, fill=None):
     """Rotate the image by angle.
 
 
@@ -694,15 +750,19 @@ def rotate(img, angle, resample=False, expand=False, center=None):
         center (2-tuple, optional): Optional center of rotation.
             Origin is the upper left corner.
             Default is the center of the image.
+        fill (n-tuple or int or float): Pixel fill value for area outside the rotated
+            image. If int or float, the value is used for all bands respectively.
+            Defaults to 0 for all bands. This option is only available for ``pillow>=5.2.0``.
 
     .. _filters: https://pillow.readthedocs.io/en/latest/handbook/concepts.html#filters
 
     """
-
     if not _is_pil_image(img):
         raise TypeError('img should be PIL Image. Got {}'.format(type(img)))
 
-    return img.rotate(angle, resample, expand, center)
+    opts = _parse_fill(fill, img, '5.2.0')
+
+    return img.rotate(angle, resample, expand, center, **opts)
 
 
 def _get_inverse_affine_matrix(center, angle, translate, scale, shear):
@@ -713,31 +773,52 @@ def _get_inverse_affine_matrix(center, angle, translate, scale, shear):
     # where T is translation matrix: [1, 0, tx | 0, 1, ty | 0, 0, 1]
     #       C is translation matrix to keep center: [1, 0, cx | 0, 1, cy | 0, 0, 1]
     #       RSS is rotation with scale and shear matrix
-    #       RSS(a, scale, shear) = [ cos(a)*scale    -sin(a + shear)*scale     0]
-    #                              [ sin(a)*scale    cos(a + shear)*scale     0]
-    #                              [     0                  0          1]
+    #       RSS(a, s, (sx, sy)) =
+    #       = R(a) * S(s) * SHy(sy) * SHx(sx)
+    #       = [ s*cos(a - sy)/cos(sy), s*(-cos(a - sy)*tan(x)/cos(y) - sin(a)), 0 ]
+    #         [ s*sin(a + sy)/cos(sy), s*(-sin(a - sy)*tan(x)/cos(y) + cos(a)), 0 ]
+    #         [ 0                    , 0                                      , 1 ]
+    #
+    # where R is a rotation matrix, S is a scaling matrix, and SHx and SHy are the shears:
+    # SHx(s) = [1, -tan(s)] and SHy(s) = [1      , 0]
+    #          [0, 1      ]              [-tan(s), 1]
+    #
     # Thus, the inverse is M^-1 = C * RSS^-1 * C^-1 * T^-1
 
-    angle = math.radians(angle)
-    shear = math.radians(shear)
-    scale = 1.0 / scale
+    if isinstance(shear, numbers.Number):
+        shear = [shear, 0]
+
+    if not isinstance(shear, (tuple, list)) and len(shear) == 2:
+        raise ValueError(
+            "Shear should be a single value or a tuple/list containing " +
+            "two values. Got {}".format(shear))
+
+    rot = math.radians(angle)
+    sx, sy = [math.radians(s) for s in shear]
+
+    cx, cy = center
+    tx, ty = translate
+
+    # RSS without scaling
+    a = cos(rot - sy) / cos(sy)
+    b = -cos(rot - sy) * tan(sx) / cos(sy) - sin(rot)
+    c = sin(rot - sy) / cos(sy)
+    d = -sin(rot - sy) * tan(sx) / cos(sy) + cos(rot)
 
     # Inverted rotation matrix with scale and shear
-    d = math.cos(angle + shear) * math.cos(angle) + math.sin(angle + shear) * math.sin(angle)
-    matrix = [
-        math.cos(angle + shear), math.sin(angle + shear), 0,
-        -math.sin(angle), math.cos(angle), 0
-    ]
-    matrix = [scale / d * m for m in matrix]
+    # det([[a, b], [c, d]]) == 1, since det(rotation) = 1 and det(shear) = 1
+    M = [d, -b, 0,
+         -c, a, 0]
+    M = [x / scale for x in M]
 
     # Apply inverse of translation and of center translation: RSS^-1 * C^-1 * T^-1
-    matrix[2] += matrix[0] * (-center[0] - translate[0]) + matrix[1] * (-center[1] - translate[1])
-    matrix[5] += matrix[3] * (-center[0] - translate[0]) + matrix[4] * (-center[1] - translate[1])
+    M[2] += M[0] * (-cx - tx) + M[1] * (-cy - ty)
+    M[5] += M[3] * (-cx - tx) + M[4] * (-cy - ty)
 
     # Apply center translation: C * RSS^-1 * C^-1 * T^-1
-    matrix[2] += center[0]
-    matrix[5] += center[1]
-    return matrix
+    M[2] += cx
+    M[5] += cy
+    return M
 
 
 def affine(img, angle, translate, scale, shear, resample=0, fillcolor=None):
@@ -748,7 +829,9 @@ def affine(img, angle, translate, scale, shear, resample=0, fillcolor=None):
         angle (float or int): rotation angle in degrees between -180 and 180, clockwise direction.
         translate (list or tuple of integers): horizontal and vertical translations (post-rotation translation)
         scale (float): overall scale
-        shear (float): shear angle value in degrees between -180 to 180, clockwise direction.
+        shear (float or tuple or list): shear angle value in degrees between -180 to 180, clockwise direction.
+        If a tuple of list is specified, the first value corresponds to a shear parallel to the x axis, while
+        the second value corresponds to a shear parallel to the y axis.
         resample (``PIL.Image.NEAREST`` or ``PIL.Image.BILINEAR`` or ``PIL.Image.BICUBIC``, optional):
             An optional resampling filter.
             See `filters`_ for more information.
@@ -766,7 +849,7 @@ def affine(img, angle, translate, scale, shear, resample=0, fillcolor=None):
     output_size = img.size
     center = (img.size[0] * 0.5 + 0.5, img.size[1] * 0.5 + 0.5)
     matrix = _get_inverse_affine_matrix(center, angle, translate, scale, shear)
-    kwargs = {"fillcolor": fillcolor} if PILLOW_VERSION[0] >= '5' else {}
+    kwargs = {"fillcolor": fillcolor} if int(PILLOW_VERSION.split('.')[0]) >= 5 else {}
     return img.transform(output_size, Image.AFFINE, matrix, resample, **kwargs)
 
 
@@ -795,4 +878,29 @@ def to_grayscale(img, num_output_channels=1):
     else:
         raise ValueError('num_output_channels should be either 1 or 3')
 
+    return img
+
+
+def erase(img, i, j, h, w, v, inplace=False):
+    """ Erase the input Tensor Image with given value.
+
+    Args:
+        img (Tensor Image): Tensor image of size (C, H, W) to be erased
+        i (int): i in (i,j) i.e coordinates of the upper left corner.
+        j (int): j in (i,j) i.e coordinates of the upper left corner.
+        h (int): Height of the erased region.
+        w (int): Width of the erased region.
+        v: Erasing value.
+        inplace(bool, optional): For in-place operations. By default is set False.
+
+    Returns:
+        Tensor Image: Erased image.
+    """
+    if not isinstance(img, torch.Tensor):
+        raise TypeError('img should be Tensor Image. Got {}'.format(type(img)))
+
+    if not inplace:
+        img = img.clone()
+
+    img[:, i:i + h, j:j + w] = v
     return img

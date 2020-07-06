@@ -1,4 +1,3 @@
-from __future__ import print_function
 import os
 import io
 import re
@@ -7,11 +6,13 @@ from setuptools import setup, find_packages
 from pkg_resources import get_distribution, DistributionNotFound
 import subprocess
 import distutils.command.clean
+import distutils.spawn
 import glob
 import shutil
 
 import torch
-from torch.utils.cpp_extension import CppExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
+from torch.utils.hipify import hipify_python
 
 
 def read(*names, **kwargs):
@@ -29,9 +30,9 @@ def get_dist(pkgname):
         return None
 
 
-version = '0.3.0'
+version = '0.6.0a0'
 sha = 'Unknown'
-package_name = os.getenv('TORCHVISION_PACKAGE_NAME', 'torchvision')
+package_name = 'torchvision'
 
 cwd = os.path.dirname(os.path.abspath(__file__))
 
@@ -63,12 +64,13 @@ write_version_file()
 
 readme = open('README.rst').read()
 
-pytorch_package_name = os.getenv('TORCHVISION_PYTORCH_DEPENDENCY_NAME', 'torch >= 1.1.0')
+pytorch_dep = 'torch'
+if os.getenv('PYTORCH_VERSION'):
+    pytorch_dep += "==" + os.getenv('PYTORCH_VERSION')
 
 requirements = [
     'numpy',
-    'six',
-    pytorch_package_name,
+    pytorch_dep,
 ]
 
 pillow_ver = ' >= 4.1.1'
@@ -82,27 +84,70 @@ def get_extensions():
 
     main_file = glob.glob(os.path.join(extensions_dir, '*.cpp'))
     source_cpu = glob.glob(os.path.join(extensions_dir, 'cpu', '*.cpp'))
-    source_cuda = glob.glob(os.path.join(extensions_dir, 'cuda', '*.cu'))
+
+    is_rocm_pytorch = False
+    if torch.__version__ >= '1.5':
+        from torch.utils.cpp_extension import ROCM_HOME
+        is_rocm_pytorch = True if ((torch.version.hip is not None) and (ROCM_HOME is not None)) else False
+
+    if is_rocm_pytorch:
+        hipify_python.hipify(
+            project_directory=this_dir,
+            output_directory=this_dir,
+            includes="torchvision/csrc/cuda/*",
+            show_detailed=True,
+            is_pytorch_extension=True,
+        )
+        source_cuda = glob.glob(os.path.join(extensions_dir, 'hip', '*.hip'))
+        # Copy over additional files
+        shutil.copy("torchvision/csrc/cuda/cuda_helpers.h", "torchvision/csrc/hip/cuda_helpers.h")
+        shutil.copy("torchvision/csrc/cuda/vision_cuda.h", "torchvision/csrc/hip/vision_cuda.h")
+
+    else:
+        source_cuda = glob.glob(os.path.join(extensions_dir, 'cuda', '*.cu'))
 
     sources = main_file + source_cpu
     extension = CppExtension
 
+    compile_cpp_tests = os.getenv('WITH_CPP_MODELS_TEST', '0') == '1'
+    if compile_cpp_tests:
+        test_dir = os.path.join(this_dir, 'test')
+        models_dir = os.path.join(this_dir, 'torchvision', 'csrc', 'models')
+        test_file = glob.glob(os.path.join(test_dir, '*.cpp'))
+        source_models = glob.glob(os.path.join(models_dir, '*.cpp'))
+
+        test_file = [os.path.join(test_dir, s) for s in test_file]
+        source_models = [os.path.join(models_dir, s) for s in source_models]
+        tests = test_file + source_models
+        tests_include_dirs = [test_dir, models_dir]
+
     define_macros = []
 
     extra_compile_args = {}
-    if torch.cuda.is_available() and CUDA_HOME is not None:
+    if (torch.cuda.is_available() and ((CUDA_HOME is not None) or is_rocm_pytorch)) \
+            or os.getenv('FORCE_CUDA', '0') == '1':
         extension = CUDAExtension
         sources += source_cuda
-        define_macros += [('WITH_CUDA', None)]
-        nvcc_flags = os.getenv('NVCC_FLAGS', '')
-        if nvcc_flags == '':
-            nvcc_flags = []
+        if not is_rocm_pytorch:
+            define_macros += [('WITH_CUDA', None)]
+            nvcc_flags = os.getenv('NVCC_FLAGS', '')
+            if nvcc_flags == '':
+                nvcc_flags = []
+            else:
+                nvcc_flags = nvcc_flags.split(' ')
         else:
-            nvcc_flags = nvcc_flags.split(' ')
+            define_macros += [('WITH_HIP', None)]
+            nvcc_flags = []
         extra_compile_args = {
-            'cxx': ['-O0'],
+            'cxx': [],
             'nvcc': nvcc_flags,
         }
+
+    if sys.platform == 'win32':
+        define_macros += [('torchvision_EXPORTS', None)]
+
+        extra_compile_args.setdefault('cxx', [])
+        extra_compile_args['cxx'].append('/MP')
 
     sources = [os.path.join(extensions_dir, s) for s in sources]
 
@@ -117,6 +162,55 @@ def get_extensions():
             extra_compile_args=extra_compile_args,
         )
     ]
+    if compile_cpp_tests:
+        ext_modules.append(
+            extension(
+                'torchvision._C_tests',
+                tests,
+                include_dirs=tests_include_dirs,
+                define_macros=define_macros,
+                extra_compile_args=extra_compile_args,
+            )
+        )
+
+    ffmpeg_exe = distutils.spawn.find_executable('ffmpeg')
+    has_ffmpeg = ffmpeg_exe is not None
+
+    if has_ffmpeg:
+        ffmpeg_bin = os.path.dirname(ffmpeg_exe)
+        ffmpeg_root = os.path.dirname(ffmpeg_bin)
+        ffmpeg_include_dir = os.path.join(ffmpeg_root, 'include')
+
+        # TorchVision base decoder + video reader
+        video_reader_src_dir = os.path.join(this_dir, 'torchvision', 'csrc', 'cpu', 'video_reader')
+        video_reader_src = glob.glob(os.path.join(video_reader_src_dir, "*.cpp"))
+        base_decoder_src_dir = os.path.join(this_dir, 'torchvision', 'csrc', 'cpu', 'decoder')
+        base_decoder_src = glob.glob(
+            os.path.join(base_decoder_src_dir, "[!sync_decoder_test,!utils_test]*.cpp"))
+
+        combined_src = video_reader_src + base_decoder_src
+
+        ext_modules.append(
+            CppExtension(
+                'torchvision.video_reader',
+                combined_src,
+                include_dirs=[
+                    base_decoder_src_dir,
+                    video_reader_src_dir,
+                    ffmpeg_include_dir,
+                    extensions_dir,
+                ],
+                libraries=[
+                    'avcodec',
+                    'avformat',
+                    'avutil',
+                    'swresample',
+                    'swscale',
+                ],
+                extra_compile_args=["-std=c++14"],
+                extra_link_args=["-std=c++14"],
+            )
+        )
 
     return ext_modules
 
@@ -150,11 +244,14 @@ setup(
     # Package info
     packages=find_packages(exclude=('test',)),
 
-    zip_safe=True,
+    zip_safe=False,
     install_requires=requirements,
     extras_require={
         "scipy": ["scipy"],
     },
     ext_modules=get_extensions(),
-    cmdclass={'build_ext': torch.utils.cpp_extension.BuildExtension, 'clean': clean}
+    cmdclass={
+        'build_ext': BuildExtension.with_options(no_python_abi_suffix=True),
+        'clean': clean,
+    }
 )

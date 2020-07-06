@@ -1,6 +1,8 @@
 import bisect
 from collections import defaultdict
 import copy
+from itertools import repeat, chain
+import math
 import numpy as np
 
 import torch
@@ -10,6 +12,12 @@ from torch.utils.model_zoo import tqdm
 import torchvision
 
 from PIL import Image
+
+
+def _repeat_to_at_least(iterable, n):
+    repeat_times = math.ceil(n / len(iterable))
+    repeated = chain.from_iterable(repeat(iterable, repeat_times))
+    return list(repeated)
 
 
 class GroupedBatchSampler(BatchSampler):
@@ -63,8 +71,8 @@ class GroupedBatchSampler(BatchSampler):
             for group_id, _ in sorted(buffer_per_group.items(),
                                       key=lambda x: len(x[1]), reverse=True):
                 remaining = self.batch_size - len(buffer_per_group[group_id])
-                buffer_per_group[group_id].extend(
-                    samples_per_group[group_id][:remaining])
+                samples_from_group_id = _repeat_to_at_least(samples_per_group[group_id], remaining)
+                buffer_per_group[group_id].extend(samples_from_group_id[:remaining])
                 assert len(buffer_per_group[group_id]) == self.batch_size
                 yield buffer_per_group[group_id]
                 num_remaining -= 1
@@ -101,10 +109,10 @@ def _compute_aspect_ratios_slow(dataset, indices=None):
         collate_fn=lambda x: x[0])
     aspect_ratios = []
     with tqdm(total=len(dataset)) as pbar:
-        for i, (img, _) in enumerate(data_loader):
+        for _i, (img, _) in enumerate(data_loader):
             pbar.update(1)
             height, width = img.shape[-2:]
-            aspect_ratio = float(height) / float(width)
+            aspect_ratio = float(width) / float(height)
             aspect_ratios.append(aspect_ratio)
     return aspect_ratios
 
@@ -115,7 +123,7 @@ def _compute_aspect_ratios_custom_dataset(dataset, indices=None):
     aspect_ratios = []
     for i in indices:
         height, width = dataset.get_height_and_width(i)
-        aspect_ratio = float(height) / float(width)
+        aspect_ratio = float(width) / float(height)
         aspect_ratios.append(aspect_ratio)
     return aspect_ratios
 
@@ -126,7 +134,7 @@ def _compute_aspect_ratios_coco_dataset(dataset, indices=None):
     aspect_ratios = []
     for i in indices:
         img_info = dataset.coco.imgs[dataset.ids[i]]
-        aspect_ratio = float(img_info["height"]) / float(img_info["width"])
+        aspect_ratio = float(img_info["width"]) / float(img_info["height"])
         aspect_ratios.append(aspect_ratio)
     return aspect_ratios
 
@@ -138,7 +146,7 @@ def _compute_aspect_ratios_voc_dataset(dataset, indices=None):
     for i in indices:
         # this doesn't load the data into memory, because PIL loads it lazily
         width, height = Image.open(dataset.images[i]).size
-        aspect_ratio = float(height) / float(width)
+        aspect_ratio = float(width) / float(height)
         aspect_ratios.append(aspect_ratio)
     return aspect_ratios
 

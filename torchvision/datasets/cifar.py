@@ -1,17 +1,11 @@
-from __future__ import print_function
 from PIL import Image
 import os
 import os.path
 import numpy as np
-import sys
-
-if sys.version_info[0] == 2:
-    import cPickle as pickle
-else:
-    import pickle
+import pickle
 
 from .vision import VisionDataset
-from .utils import download_url, check_integrity
+from .utils import check_integrity, download_and_extract_archive
 
 
 class CIFAR10(VisionDataset):
@@ -52,13 +46,11 @@ class CIFAR10(VisionDataset):
         'md5': '5ff9c542aee3614f3951f8cda6e48888',
     }
 
-    def __init__(self, root, train=True,
-                 transform=None, target_transform=None,
+    def __init__(self, root, train=True, transform=None, target_transform=None,
                  download=False):
 
-        super(CIFAR10, self).__init__(root)
-        self.transform = transform
-        self.target_transform = target_transform
+        super(CIFAR10, self).__init__(root, transform=transform,
+                                      target_transform=target_transform)
 
         self.train = train  # training set or test set
 
@@ -81,10 +73,7 @@ class CIFAR10(VisionDataset):
         for file_name, checksum in downloaded_list:
             file_path = os.path.join(self.root, self.base_folder, file_name)
             with open(file_path, 'rb') as f:
-                if sys.version_info[0] == 2:
-                    entry = pickle.load(f)
-                else:
-                    entry = pickle.load(f, encoding='latin1')
+                entry = pickle.load(f, encoding='latin1')
                 self.data.append(entry['data'])
                 if 'labels' in entry:
                     self.targets.extend(entry['labels'])
@@ -102,10 +91,7 @@ class CIFAR10(VisionDataset):
             raise RuntimeError('Dataset metadata file not found or corrupted.' +
                                ' You can use download=True to download it')
         with open(path, 'rb') as infile:
-            if sys.version_info[0] == 2:
-                data = pickle.load(infile)
-            else:
-                data = pickle.load(infile, encoding='latin1')
+            data = pickle.load(infile, encoding='latin1')
             self.classes = data[self.meta['key']]
         self.class_to_idx = {_class: i for i, _class in enumerate(self.classes)}
 
@@ -144,17 +130,10 @@ class CIFAR10(VisionDataset):
         return True
 
     def download(self):
-        import tarfile
-
         if self._check_integrity():
             print('Files already downloaded and verified')
             return
-
-        download_url(self.url, self.root, self.filename, self.tgz_md5)
-
-        # extract file
-        with tarfile.open(os.path.join(self.root, self.filename), "r:gz") as tar:
-            tar.extractall(path=self.root)
+        download_and_extract_archive(self.url, self.root, filename=self.filename, md5=self.tgz_md5)
 
     def extra_repr(self):
         return "Split: {}".format("Train" if self.train is True else "Test")

@@ -1,14 +1,17 @@
-from __future__ import print_function
 from PIL import Image
 import os
 import os.path
 
 from .vision import VisionDataset
-from .utils import download_url, makedir_exist_ok
+from .utils import download_and_extract_archive, verify_str_arg
 
 
 class Caltech101(VisionDataset):
     """`Caltech 101 <http://www.vision.caltech.edu/Image_Datasets/Caltech101/>`_ Dataset.
+
+    .. warning::
+
+        This class needs `scipy <https://docs.scipy.org/doc/>`_ to load target files from `.mat` format.
 
     Args:
         root (string): Root directory of dataset where directory
@@ -26,17 +29,16 @@ class Caltech101(VisionDataset):
             downloaded again.
     """
 
-    def __init__(self, root, target_type="category",
-                 transform=None, target_transform=None,
-                 download=False):
-        super(Caltech101, self).__init__(os.path.join(root, 'caltech101'))
-        makedir_exist_ok(self.root)
-        if isinstance(target_type, list):
-            self.target_type = target_type
-        else:
-            self.target_type = [target_type]
-        self.transform = transform
-        self.target_transform = target_transform
+    def __init__(self, root, target_type="category", transform=None,
+                 target_transform=None, download=False):
+        super(Caltech101, self).__init__(os.path.join(root, 'caltech101'),
+                                         transform=transform,
+                                         target_transform=target_transform)
+        os.makedirs(self.root, exist_ok=True)
+        if not isinstance(target_type, list):
+            target_type = [target_type]
+        self.target_type = [verify_str_arg(t, "target_type", ("category", "annotation"))
+                            for t in target_type]
 
         if download:
             self.download()
@@ -89,8 +91,6 @@ class Caltech101(VisionDataset):
                                                      self.annotation_categories[self.y[index]],
                                                      "annotation_{:04d}.mat".format(self.index[index])))
                 target.append(data["obj_contour"])
-            else:
-                raise ValueError("Target type \"{}\" is not recognized.".format(t))
         target = tuple(target) if len(target) > 1 else target[0]
 
         if self.transform is not None:
@@ -109,27 +109,20 @@ class Caltech101(VisionDataset):
         return len(self.index)
 
     def download(self):
-        import tarfile
-
         if self._check_integrity():
             print('Files already downloaded and verified')
             return
 
-        download_url("http://www.vision.caltech.edu/Image_Datasets/Caltech101/101_ObjectCategories.tar.gz",
-                     self.root,
-                     "101_ObjectCategories.tar.gz",
-                     "b224c7392d521a49829488ab0f1120d9")
-        download_url("http://www.vision.caltech.edu/Image_Datasets/Caltech101/Annotations.tar",
-                     self.root,
-                     "101_Annotations.tar",
-                     "6f83eeb1f24d99cab4eb377263132c91")
-
-        # extract file
-        with tarfile.open(os.path.join(self.root, "101_ObjectCategories.tar.gz"), "r:gz") as tar:
-            tar.extractall(path=self.root)
-
-        with tarfile.open(os.path.join(self.root, "101_Annotations.tar"), "r:") as tar:
-            tar.extractall(path=self.root)
+        download_and_extract_archive(
+            "http://www.vision.caltech.edu/Image_Datasets/Caltech101/101_ObjectCategories.tar.gz",
+            self.root,
+            filename="101_ObjectCategories.tar.gz",
+            md5="b224c7392d521a49829488ab0f1120d9")
+        download_and_extract_archive(
+            "http://www.vision.caltech.edu/Image_Datasets/Caltech101/Annotations.tar",
+            self.root,
+            filename="101_Annotations.tar",
+            md5="6f83eeb1f24d99cab4eb377263132c91")
 
     def extra_repr(self):
         return "Target type: {target_type}".format(**self.__dict__)
@@ -150,13 +143,11 @@ class Caltech256(VisionDataset):
             downloaded again.
     """
 
-    def __init__(self, root,
-                 transform=None, target_transform=None,
-                 download=False):
-        super(Caltech256, self).__init__(os.path.join(root, 'caltech256'))
-        makedir_exist_ok(self.root)
-        self.transform = transform
-        self.target_transform = target_transform
+    def __init__(self, root, transform=None, target_transform=None, download=False):
+        super(Caltech256, self).__init__(os.path.join(root, 'caltech256'),
+                                         transform=transform,
+                                         target_transform=target_transform)
+        os.makedirs(self.root, exist_ok=True)
 
         if download:
             self.download()
@@ -204,17 +195,12 @@ class Caltech256(VisionDataset):
         return len(self.index)
 
     def download(self):
-        import tarfile
-
         if self._check_integrity():
             print('Files already downloaded and verified')
             return
 
-        download_url("http://www.vision.caltech.edu/Image_Datasets/Caltech256/256_ObjectCategories.tar",
-                     self.root,
-                     "256_ObjectCategories.tar",
-                     "67b4f42ca05d46448c6bb8ecd2220f6d")
-
-        # extract file
-        with tarfile.open(os.path.join(self.root, "256_ObjectCategories.tar"), "r:") as tar:
-            tar.extractall(path=self.root)
+        download_and_extract_archive(
+            "http://www.vision.caltech.edu/Image_Datasets/Caltech256/256_ObjectCategories.tar",
+            self.root,
+            filename="256_ObjectCategories.tar",
+            md5="67b4f42ca05d46448c6bb8ecd2220f6d")

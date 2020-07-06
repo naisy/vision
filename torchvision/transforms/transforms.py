@@ -1,7 +1,5 @@
-from __future__ import division
 import torch
 import math
-import sys
 import random
 from PIL import Image
 try:
@@ -11,24 +9,17 @@ except ImportError:
 import numpy as np
 import numbers
 import types
-import collections
+from collections.abc import Sequence, Iterable
 import warnings
 
 from . import functional as F
-
-if sys.version_info < (3, 3):
-    Sequence = collections.Sequence
-    Iterable = collections.Iterable
-else:
-    Sequence = collections.abc.Sequence
-    Iterable = collections.abc.Iterable
 
 
 __all__ = ["Compose", "ToTensor", "ToPILImage", "Normalize", "Resize", "Scale", "CenterCrop", "Pad",
            "Lambda", "RandomApply", "RandomChoice", "RandomOrder", "RandomCrop", "RandomHorizontalFlip",
            "RandomVerticalFlip", "RandomResizedCrop", "RandomSizedCrop", "FiveCrop", "TenCrop", "LinearTransformation",
            "ColorJitter", "RandomRotation", "RandomAffine", "Grayscale", "RandomGrayscale",
-           "RandomPerspective"]
+           "RandomPerspective", "RandomErasing"]
 
 _pil_interpolation_to_str = {
     Image.NEAREST: 'PIL.Image.NEAREST',
@@ -38,6 +29,15 @@ _pil_interpolation_to_str = {
     Image.HAMMING: 'PIL.Image.HAMMING',
     Image.BOX: 'PIL.Image.BOX',
 }
+
+
+def _get_image_size(img):
+    if F._is_pil_image(img):
+        return img.size
+    elif isinstance(img, torch.Tensor) and img.dim() > 2:
+        return img.shape[-2:][::-1]
+    else:
+        raise TypeError("Unexpected type {}".format(type(img)))
 
 
 class Compose(object):
@@ -138,14 +138,16 @@ class Normalize(object):
     """Normalize a tensor image with mean and standard deviation.
     Given mean: ``(M1,...,Mn)`` and std: ``(S1,..,Sn)`` for ``n`` channels, this transform
     will normalize each channel of the input ``torch.*Tensor`` i.e.
-    ``input[channel] = (input[channel] - mean[channel]) / std[channel]``
+    ``output[channel] = (input[channel] - mean[channel]) / std[channel]``
 
     .. note::
-        This transform acts out of place, i.e., it does not mutates the input tensor.
+        This transform acts out of place, i.e., it does not mutate the input tensor.
 
     Args:
         mean (sequence): Sequence of means for each channel.
         std (sequence): Sequence of standard deviations for each channel.
+        inplace(bool,optional): Bool to make this operation in-place.
+
     """
 
     def __init__(self, mean, std, inplace=False):
@@ -442,7 +444,7 @@ class RandomCrop(object):
         Returns:
             tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
         """
-        w, h = img.size
+        w, h = _get_image_size(img)
         th, tw = output_size
         if w == tw and h == th:
             return 0, 0, h, w
@@ -539,12 +541,15 @@ class RandomPerspective(object):
 
         distortion_scale(float): it controls the degree of distortion and ranges from 0 to 1. Default value is 0.5.
 
+        fill (3-tuple or int): RGB pixel fill value for area outside the rotated image.
+            If int, it is used for all channels respectively. Default value is 0.
     """
 
-    def __init__(self, distortion_scale=0.5, p=0.5, interpolation=Image.BICUBIC):
+    def __init__(self, distortion_scale=0.5, p=0.5, interpolation=Image.BICUBIC, fill=0):
         self.p = p
         self.interpolation = interpolation
         self.distortion_scale = distortion_scale
+        self.fill = fill
 
     def __call__(self, img):
         """
@@ -560,7 +565,7 @@ class RandomPerspective(object):
         if random.random() < self.p:
             width, height = img.size
             startpoints, endpoints = self.get_params(width, height, self.distortion_scale)
-            return F.perspective(img, startpoints, endpoints, self.interpolation)
+            return F.perspective(img, startpoints, endpoints, self.interpolation, self.fill)
         return img
 
     @staticmethod
@@ -609,7 +614,7 @@ class RandomResizedCrop(object):
     """
 
     def __init__(self, size, scale=(0.08, 1.0), ratio=(3. / 4., 4. / 3.), interpolation=Image.BILINEAR):
-        if isinstance(size, tuple):
+        if isinstance(size, (tuple, list)):
             self.size = size
         else:
             self.size = (size, size)
@@ -633,9 +638,10 @@ class RandomResizedCrop(object):
             tuple: params (i, j, h, w) to be passed to ``crop`` for a random
                 sized crop.
         """
-        area = img.size[0] * img.size[1]
+        width, height = _get_image_size(img)
+        area = height * width
 
-        for attempt in range(10):
+        for _ in range(10):
             target_area = random.uniform(*scale) * area
             log_ratio = (math.log(ratio[0]), math.log(ratio[1]))
             aspect_ratio = math.exp(random.uniform(*log_ratio))
@@ -643,24 +649,24 @@ class RandomResizedCrop(object):
             w = int(round(math.sqrt(target_area * aspect_ratio)))
             h = int(round(math.sqrt(target_area / aspect_ratio)))
 
-            if w <= img.size[0] and h <= img.size[1]:
-                i = random.randint(0, img.size[1] - h)
-                j = random.randint(0, img.size[0] - w)
+            if 0 < w <= width and 0 < h <= height:
+                i = random.randint(0, height - h)
+                j = random.randint(0, width - w)
                 return i, j, h, w
 
         # Fallback to central crop
-        in_ratio = img.size[0] / img.size[1]
+        in_ratio = float(width) / float(height)
         if (in_ratio < min(ratio)):
-            w = img.size[0]
-            h = w / min(ratio)
+            w = width
+            h = int(round(w / min(ratio)))
         elif (in_ratio > max(ratio)):
-            h = img.size[1]
-            w = h * max(ratio)
+            h = height
+            w = int(round(h * max(ratio)))
         else:  # whole image
-            w = img.size[0]
-            h = img.size[1]
-        i = (img.size[1] - h) // 2
-        j = (img.size[0] - w) // 2
+            w = width
+            h = height
+        i = (height - h) // 2
+        j = (width - w) // 2
         return i, j, h, w
 
     def __call__(self, img):
@@ -944,12 +950,15 @@ class RandomRotation(object):
         center (2-tuple, optional): Optional center of rotation.
             Origin is the upper left corner.
             Default is the center of the image.
+        fill (n-tuple or int or float): Pixel fill value for area outside the rotated
+            image. If int or float, the value is used for all bands respectively.
+            Defaults to 0 for all bands. This option is only available for ``pillow>=5.2.0``.
 
     .. _filters: https://pillow.readthedocs.io/en/latest/handbook/concepts.html#filters
 
     """
 
-    def __init__(self, degrees, resample=False, expand=False, center=None):
+    def __init__(self, degrees, resample=False, expand=False, center=None, fill=None):
         if isinstance(degrees, numbers.Number):
             if degrees < 0:
                 raise ValueError("If degrees is a single number, it must be positive.")
@@ -962,6 +971,7 @@ class RandomRotation(object):
         self.resample = resample
         self.expand = expand
         self.center = center
+        self.fill = fill
 
     @staticmethod
     def get_params(degrees):
@@ -985,7 +995,7 @@ class RandomRotation(object):
 
         angle = self.get_params(self.degrees)
 
-        return F.rotate(img, angle, self.resample, self.expand, self.center)
+        return F.rotate(img, angle, self.resample, self.expand, self.center, self.fill)
 
     def __repr__(self):
         format_string = self.__class__.__name__ + '(degrees={0}'.format(self.degrees)
@@ -1011,12 +1021,16 @@ class RandomAffine(object):
         scale (tuple, optional): scaling factor interval, e.g (a, b), then scale is
             randomly sampled from the range a <= scale <= b. Will keep original scale by default.
         shear (sequence or float or int, optional): Range of degrees to select from.
-            If degrees is a number instead of sequence like (min, max), the range of degrees
-            will be (-degrees, +degrees). Will not apply shear by default
+            If shear is a number, a shear parallel to the x axis in the range (-shear, +shear)
+            will be apllied. Else if shear is a tuple or list of 2 values a shear parallel to the x axis in the
+            range (shear[0], shear[1]) will be applied. Else if shear is a tuple or list of 4 values,
+            a x-axis shear in (shear[0], shear[1]) and y-axis shear in (shear[2], shear[3]) will be applied.
+            Will not apply shear by default
         resample ({PIL.Image.NEAREST, PIL.Image.BILINEAR, PIL.Image.BICUBIC}, optional):
             An optional resampling filter. See `filters`_ for more information.
             If omitted, or if the image has mode "1" or "P", it is set to PIL.Image.NEAREST.
-        fillcolor (int): Optional fill color for the area outside the transform in the output image. (Pillow>=5.0.0)
+        fillcolor (tuple or int): Optional fill color (Tuple for RGB Image And int for grayscale) for the area
+            outside the transform in the output image.(Pillow>=5.0.0)
 
     .. _filters: https://pillow.readthedocs.io/en/latest/handbook/concepts.html#filters
 
@@ -1054,9 +1068,14 @@ class RandomAffine(object):
                     raise ValueError("If shear is a single number, it must be positive.")
                 self.shear = (-shear, shear)
             else:
-                assert isinstance(shear, (tuple, list)) and len(shear) == 2, \
-                    "shear should be a list or tuple and it must be of length 2."
-                self.shear = shear
+                assert isinstance(shear, (tuple, list)) and \
+                    (len(shear) == 2 or len(shear) == 4), \
+                    "shear should be a list or tuple and it must be of length 2 or 4."
+                # X-Axis shear with [min, max]
+                if len(shear) == 2:
+                    self.shear = [shear[0], shear[1], 0., 0.]
+                elif len(shear) == 4:
+                    self.shear = [s for s in shear]
         else:
             self.shear = shear
 
@@ -1085,7 +1104,11 @@ class RandomAffine(object):
             scale = 1.0
 
         if shears is not None:
-            shear = random.uniform(shears[0], shears[1])
+            if len(shears) == 2:
+                shear = [random.uniform(shears[0], shears[1]), 0.]
+            elif len(shears) == 4:
+                shear = [random.uniform(shears[0], shears[1]),
+                         random.uniform(shears[2], shears[3])]
         else:
             shear = 0.0
 
@@ -1127,8 +1150,8 @@ class Grayscale(object):
 
     Returns:
         PIL Image: Grayscale version of the input.
-        - If num_output_channels == 1 : returned image is single channel
-        - If num_output_channels == 3 : returned image is 3 channel with r == g == b
+         - If ``num_output_channels == 1`` : returned image is single channel
+         - If ``num_output_channels == 3`` : returned image is 3 channel with r == g == b
 
     """
 
@@ -1181,3 +1204,94 @@ class RandomGrayscale(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '(p={0})'.format(self.p)
+
+
+class RandomErasing(object):
+    """ Randomly selects a rectangle region in an image and erases its pixels.
+    'Random Erasing Data Augmentation' by Zhong et al. See https://arxiv.org/pdf/1708.04896.pdf
+
+    Args:
+         p: probability that the random erasing operation will be performed.
+         scale: range of proportion of erased area against input image.
+         ratio: range of aspect ratio of erased area.
+         value: erasing value. Default is 0. If a single int, it is used to
+            erase all pixels. If a tuple of length 3, it is used to erase
+            R, G, B channels respectively.
+            If a str of 'random', erasing each pixel with random values.
+         inplace: boolean to make this transform inplace. Default set to False.
+
+    Returns:
+        Erased Image.
+
+    # Examples:
+        >>> transform = transforms.Compose([
+        >>>   transforms.RandomHorizontalFlip(),
+        >>>   transforms.ToTensor(),
+        >>>   transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        >>>   transforms.RandomErasing(),
+        >>> ])
+    """
+
+    def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False):
+        assert isinstance(value, (numbers.Number, str, tuple, list))
+        if (scale[0] > scale[1]) or (ratio[0] > ratio[1]):
+            warnings.warn("range should be of kind (min, max)")
+        if scale[0] < 0 or scale[1] > 1:
+            raise ValueError("range of scale should be between 0 and 1")
+        if p < 0 or p > 1:
+            raise ValueError("range of random erasing probability should be between 0 and 1")
+
+        self.p = p
+        self.scale = scale
+        self.ratio = ratio
+        self.value = value
+        self.inplace = inplace
+
+    @staticmethod
+    def get_params(img, scale, ratio, value=0):
+        """Get parameters for ``erase`` for a random erasing.
+
+        Args:
+            img (Tensor): Tensor image of size (C, H, W) to be erased.
+            scale: range of proportion of erased area against input image.
+            ratio: range of aspect ratio of erased area.
+
+        Returns:
+            tuple: params (i, j, h, w, v) to be passed to ``erase`` for random erasing.
+        """
+        img_c, img_h, img_w = img.shape
+        area = img_h * img_w
+
+        for _ in range(10):
+            erase_area = random.uniform(scale[0], scale[1]) * area
+            aspect_ratio = random.uniform(ratio[0], ratio[1])
+
+            h = int(round(math.sqrt(erase_area * aspect_ratio)))
+            w = int(round(math.sqrt(erase_area / aspect_ratio)))
+
+            if h < img_h and w < img_w:
+                i = random.randint(0, img_h - h)
+                j = random.randint(0, img_w - w)
+                if isinstance(value, numbers.Number):
+                    v = value
+                elif isinstance(value, torch._six.string_classes):
+                    v = torch.empty([img_c, h, w], dtype=torch.float32).normal_()
+                elif isinstance(value, (list, tuple)):
+                    v = torch.tensor(value, dtype=torch.float32).view(-1, 1, 1).expand(-1, h, w)
+                return i, j, h, w, v
+
+        # Return original image
+        return 0, 0, img_h, img_w, img
+
+    def __call__(self, img):
+        """
+        Args:
+            img (Tensor): Tensor image of size (C, H, W) to be erased.
+
+        Returns:
+            img (Tensor): Erased Tensor image.
+        """
+        if random.uniform(0, 1) < self.p:
+            x, y, h, w, v = self.get_params(img, scale=self.scale, ratio=self.ratio, value=self.value)
+            return F.erase(img, x, y, h, w, v, self.inplace)
+        return img

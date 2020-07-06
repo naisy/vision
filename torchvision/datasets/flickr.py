@@ -1,13 +1,13 @@
 from collections import defaultdict
 from PIL import Image
-from six.moves import html_parser
+from html.parser import HTMLParser
 
 import glob
 import os
 from .vision import VisionDataset
 
 
-class Flickr8kParser(html_parser.HTMLParser):
+class Flickr8kParser(HTMLParser):
     """Parser for extracting captions from the Flickr8k dataset web page."""
 
     def __init__(self, root):
@@ -63,9 +63,8 @@ class Flickr8k(VisionDataset):
     """
 
     def __init__(self, root, ann_file, transform=None, target_transform=None):
-        super(Flickr8k, self).__init__(root)
-        self.transform = transform
-        self.target_transform = target_transform
+        super(Flickr8k, self).__init__(root, transform=transform,
+                                       target_transform=target_transform)
         self.ann_file = os.path.expanduser(ann_file)
 
         # Read annotations and store in a dict
@@ -115,9 +114,8 @@ class Flickr30k(VisionDataset):
     """
 
     def __init__(self, root, ann_file, transform=None, target_transform=None):
-        super(Flickr30k, self).__init__(root)
-        self.transform = transform
-        self.target_transform = target_transform
+        super(Flickr30k, self).__init__(root, transform=transform,
+                                        target_transform=target_transform)
         self.ann_file = os.path.expanduser(ann_file)
 
         # Read annotations and store in a dict

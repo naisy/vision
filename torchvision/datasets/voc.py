@@ -1,53 +1,53 @@
 import os
-import sys
 import tarfile
 import collections
 from .vision import VisionDataset
-
-if sys.version_info[0] == 2:
-    import xml.etree.cElementTree as ET
-else:
-    import xml.etree.ElementTree as ET
-
+import xml.etree.ElementTree as ET
 from PIL import Image
-from .utils import download_url, check_integrity
+from .utils import download_url, check_integrity, verify_str_arg
 
 DATASET_YEAR_DICT = {
     '2012': {
         'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar',
         'filename': 'VOCtrainval_11-May-2012.tar',
         'md5': '6cd6e144f989b92b3379bac3b3de84fd',
-        'base_dir': 'VOCdevkit/VOC2012'
+        'base_dir': os.path.join('VOCdevkit', 'VOC2012')
     },
     '2011': {
         'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2011/VOCtrainval_25-May-2011.tar',
         'filename': 'VOCtrainval_25-May-2011.tar',
         'md5': '6c3384ef61512963050cb5d687e5bf1e',
-        'base_dir': 'TrainVal/VOCdevkit/VOC2011'
+        'base_dir': os.path.join('TrainVal', 'VOCdevkit', 'VOC2011')
     },
     '2010': {
         'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2010/VOCtrainval_03-May-2010.tar',
         'filename': 'VOCtrainval_03-May-2010.tar',
         'md5': 'da459979d0c395079b5c75ee67908abb',
-        'base_dir': 'VOCdevkit/VOC2010'
+        'base_dir': os.path.join('VOCdevkit', 'VOC2010')
     },
     '2009': {
         'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2009/VOCtrainval_11-May-2009.tar',
         'filename': 'VOCtrainval_11-May-2009.tar',
         'md5': '59065e4b188729180974ef6572f6a212',
-        'base_dir': 'VOCdevkit/VOC2009'
+        'base_dir': os.path.join('VOCdevkit', 'VOC2009')
     },
     '2008': {
         'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2008/VOCtrainval_14-Jul-2008.tar',
         'filename': 'VOCtrainval_11-May-2012.tar',
         'md5': '2629fa636546599198acfcfbfcf1904a',
-        'base_dir': 'VOCdevkit/VOC2008'
+        'base_dir': os.path.join('VOCdevkit', 'VOC2008')
     },
     '2007': {
         'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtrainval_06-Nov-2007.tar',
         'filename': 'VOCtrainval_06-Nov-2007.tar',
         'md5': 'c52e279531787c972589f7e41ab4ae64',
-        'base_dir': 'VOCdevkit/VOC2007'
+        'base_dir': os.path.join('VOCdevkit', 'VOC2007')
+    },
+    '2007-test': {
+        'url': 'http://host.robots.ox.ac.uk/pascal/VOC/voc2007/VOCtest_06-Nov-2007.tar',
+        'filename': 'VOCtest_06-Nov-2007.tar',
+        'md5': 'b6e924de25625d8de591ea690078ad9f',
+        'base_dir': os.path.join('VOCdevkit', 'VOC2007')
     }
 }
 
@@ -66,6 +66,8 @@ class VOCSegmentation(VisionDataset):
             and returns a transformed version. E.g, ``transforms.RandomCrop``
         target_transform (callable, optional): A function/transform that takes in the
             target and transforms it.
+        transforms (callable, optional): A function/transform that takes input sample and its target as entry
+            and returns a transformed version.
     """
 
     def __init__(self,
@@ -78,10 +80,15 @@ class VOCSegmentation(VisionDataset):
                  transforms=None):
         super(VOCSegmentation, self).__init__(root, transforms, transform, target_transform)
         self.year = year
+        if year == "2007" and image_set == "test":
+            year = "2007-test"
         self.url = DATASET_YEAR_DICT[year]['url']
         self.filename = DATASET_YEAR_DICT[year]['filename']
         self.md5 = DATASET_YEAR_DICT[year]['md5']
-        self.image_set = image_set
+        valid_sets = ["train", "trainval", "val"]
+        if year == "2007-test":
+            valid_sets.append("test")
+        self.image_set = verify_str_arg(image_set, "image_set", valid_sets)
         base_dir = DATASET_YEAR_DICT[year]['base_dir']
         voc_root = os.path.join(self.root, base_dir)
         image_dir = os.path.join(voc_root, 'JPEGImages')
@@ -97,11 +104,6 @@ class VOCSegmentation(VisionDataset):
         splits_dir = os.path.join(voc_root, 'ImageSets/Segmentation')
 
         split_f = os.path.join(splits_dir, image_set.rstrip('\n') + '.txt')
-
-        if not os.path.exists(split_f):
-            raise ValueError(
-                'Wrong image_set entered! Please use image_set="train" '
-                'or image_set="trainval" or image_set="val"')
 
         with open(os.path.join(split_f), "r") as f:
             file_names = [x.strip() for x in f.readlines()]
@@ -145,6 +147,8 @@ class VOCDetection(VisionDataset):
             and returns a transformed version. E.g, ``transforms.RandomCrop``
         target_transform (callable, required): A function/transform that takes in the
             target and transforms it.
+        transforms (callable, optional): A function/transform that takes input sample and its target as entry
+            and returns a transformed version.
     """
 
     def __init__(self,
@@ -157,10 +161,15 @@ class VOCDetection(VisionDataset):
                  transforms=None):
         super(VOCDetection, self).__init__(root, transforms, transform, target_transform)
         self.year = year
+        if year == "2007" and image_set == "test":
+            year = "2007-test"
         self.url = DATASET_YEAR_DICT[year]['url']
         self.filename = DATASET_YEAR_DICT[year]['filename']
         self.md5 = DATASET_YEAR_DICT[year]['md5']
-        self.image_set = image_set
+        valid_sets = ["train", "trainval", "val"]
+        if year == "2007-test":
+            valid_sets.append("test")
+        self.image_set = verify_str_arg(image_set, "image_set", valid_sets)
 
         base_dir = DATASET_YEAR_DICT[year]['base_dir']
         voc_root = os.path.join(self.root, base_dir)
@@ -177,12 +186,6 @@ class VOCDetection(VisionDataset):
         splits_dir = os.path.join(voc_root, 'ImageSets/Main')
 
         split_f = os.path.join(splits_dir, image_set.rstrip('\n') + '.txt')
-
-        if not os.path.exists(split_f):
-            raise ValueError(
-                'Wrong image_set entered! Please use image_set="train" '
-                'or image_set="trainval" or image_set="val" or a valid'
-                'image_set from the VOC ImageSets/Main folder.')
 
         with open(os.path.join(split_f), "r") as f:
             file_names = [x.strip() for x in f.readlines()]
@@ -219,6 +222,8 @@ class VOCDetection(VisionDataset):
             for dc in map(self.parse_voc_xml, children):
                 for ind, v in dc.items():
                     def_dic[ind].append(v)
+            if node.tag == 'annotation':
+                def_dic['object'] = [def_dic['object']]
             voc_dict = {
                 node.tag:
                     {ind: v[0] if len(v) == 1 else v

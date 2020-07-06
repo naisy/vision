@@ -1,14 +1,16 @@
-#include "cpu/vision.h"
+#include "vision_cpu.h"
 
 template <typename scalar_t>
 at::Tensor nms_cpu_kernel(
     const at::Tensor& dets,
     const at::Tensor& scores,
-    const float threshold) {
-  AT_ASSERTM(!dets.type().is_cuda(), "dets must be a CPU tensor");
-  AT_ASSERTM(!scores.type().is_cuda(), "scores must be a CPU tensor");
+    const float iou_threshold) {
+  AT_ASSERTM(!dets.options().device().is_cuda(), "dets must be a CPU tensor");
   AT_ASSERTM(
-      dets.type() == scores.type(), "dets should have the same type as scores");
+      !scores.options().device().is_cuda(), "scores must be a CPU tensor");
+  AT_ASSERTM(
+      dets.scalar_type() == scores.scalar_type(),
+      "dets should have the same type as scores");
 
   if (dets.numel() == 0)
     return at::empty({0}, dets.options().dtype(at::kLong));
@@ -26,14 +28,14 @@ at::Tensor nms_cpu_kernel(
   at::Tensor suppressed_t = at::zeros({ndets}, dets.options().dtype(at::kByte));
   at::Tensor keep_t = at::zeros({ndets}, dets.options().dtype(at::kLong));
 
-  auto suppressed = suppressed_t.data<uint8_t>();
-  auto keep = keep_t.data<int64_t>();
-  auto order = order_t.data<int64_t>();
-  auto x1 = x1_t.data<scalar_t>();
-  auto y1 = y1_t.data<scalar_t>();
-  auto x2 = x2_t.data<scalar_t>();
-  auto y2 = y2_t.data<scalar_t>();
-  auto areas = areas_t.data<scalar_t>();
+  auto suppressed = suppressed_t.data_ptr<uint8_t>();
+  auto keep = keep_t.data_ptr<int64_t>();
+  auto order = order_t.data_ptr<int64_t>();
+  auto x1 = x1_t.data_ptr<scalar_t>();
+  auto y1 = y1_t.data_ptr<scalar_t>();
+  auto x2 = x2_t.data_ptr<scalar_t>();
+  auto y2 = y2_t.data_ptr<scalar_t>();
+  auto areas = areas_t.data_ptr<scalar_t>();
 
   int64_t num_to_keep = 0;
 
@@ -61,7 +63,7 @@ at::Tensor nms_cpu_kernel(
       auto h = std::max(static_cast<scalar_t>(0), yy2 - yy1);
       auto inter = w * h;
       auto ovr = inter / (iarea + areas[j] - inter);
-      if (ovr >= threshold)
+      if (ovr > iou_threshold)
         suppressed[j] = 1;
     }
   }
@@ -71,11 +73,11 @@ at::Tensor nms_cpu_kernel(
 at::Tensor nms_cpu(
     const at::Tensor& dets,
     const at::Tensor& scores,
-    const float threshold) {
+    const float iou_threshold) {
   auto result = at::empty({0}, dets.options());
 
-  AT_DISPATCH_FLOATING_TYPES(dets.type(), "nms", [&] {
-    result = nms_cpu_kernel<scalar_t>(dets, scores, threshold);
+  AT_DISPATCH_FLOATING_TYPES(dets.scalar_type(), "nms", [&] {
+    result = nms_cpu_kernel<scalar_t>(dets, scores, iou_threshold);
   });
   return result;
 }

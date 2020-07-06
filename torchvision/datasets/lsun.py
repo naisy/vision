@@ -2,22 +2,18 @@ from .vision import VisionDataset
 from PIL import Image
 import os
 import os.path
-import six
+import io
 import string
-import sys
-
-if sys.version_info[0] == 2:
-    import cPickle as pickle
-else:
-    import pickle
+from collections.abc import Iterable
+import pickle
+from .utils import verify_str_arg, iterable_to_str
 
 
 class LSUNClass(VisionDataset):
     def __init__(self, root, transform=None, target_transform=None):
         import lmdb
-        super(LSUNClass, self).__init__(root)
-        self.transform = transform
-        self.target_transform = target_transform
+        super(LSUNClass, self).__init__(root, transform=transform,
+                                        target_transform=target_transform)
 
         self.env = lmdb.open(root, max_readers=1, readonly=True, lock=False,
                              readahead=False, meminit=False)
@@ -37,7 +33,7 @@ class LSUNClass(VisionDataset):
         with env.begin(write=False) as txn:
             imgbuf = txn.get(self.keys[index])
 
-        buf = six.BytesIO()
+        buf = io.BytesIO()
         buf.write(imgbuf)
         buf.seek(0)
         img = Image.open(buf).convert('RGB')
@@ -56,49 +52,22 @@ class LSUNClass(VisionDataset):
 
 class LSUN(VisionDataset):
     """
-    `LSUN <http://lsun.cs.princeton.edu>`_ dataset.
+    `LSUN <https://www.yf.io/p/lsun>`_ dataset.
 
     Args:
         root (string): Root directory for the database files.
         classes (string or list): One of {'train', 'val', 'test'} or a list of
-            categories to load. e,g. ['bedroom_train', 'church_train'].
+            categories to load. e,g. ['bedroom_train', 'church_outdoor_train'].
         transform (callable, optional): A function/transform that  takes in an PIL image
             and returns a transformed version. E.g, ``transforms.RandomCrop``
         target_transform (callable, optional): A function/transform that takes in the
             target and transforms it.
     """
 
-    def __init__(self, root, classes='train',
-                 transform=None, target_transform=None):
-        super(LSUN, self).__init__(root)
-        self.transform = transform
-        self.target_transform = target_transform
-        categories = ['bedroom', 'bridge', 'church_outdoor', 'classroom',
-                      'conference_room', 'dining_room', 'kitchen',
-                      'living_room', 'restaurant', 'tower']
-        dset_opts = ['train', 'val', 'test']
-
-        if type(classes) == str and classes in dset_opts:
-            if classes == 'test':
-                classes = [classes]
-            else:
-                classes = [c + '_' + classes for c in categories]
-        elif type(classes) == list:
-            for c in classes:
-                c_short = c.split('_')
-                c_short.pop(len(c_short) - 1)
-                c_short = '_'.join(c_short)
-                if c_short not in categories:
-                    raise (ValueError('Unknown LSUN class: ' + c_short + '.'
-                                      'Options are: ' + str(categories)))
-                c_short = c.split('_')
-                c_short = c_short.pop(len(c_short) - 1)
-                if c_short not in dset_opts:
-                    raise (ValueError('Unknown postfix: ' + c_short + '.'
-                                      'Options are: ' + str(dset_opts)))
-        else:
-            raise (ValueError('Unknown option for classes'))
-        self.classes = classes
+    def __init__(self, root, classes='train', transform=None, target_transform=None):
+        super(LSUN, self).__init__(root, transform=transform,
+                                   target_transform=target_transform)
+        self.classes = self._verify_classes(classes)
 
         # for each class, create an LSUNClassDataset
         self.dbs = []
@@ -114,6 +83,42 @@ class LSUN(VisionDataset):
             self.indices.append(count)
 
         self.length = count
+
+    def _verify_classes(self, classes):
+        categories = ['bedroom', 'bridge', 'church_outdoor', 'classroom',
+                      'conference_room', 'dining_room', 'kitchen',
+                      'living_room', 'restaurant', 'tower']
+        dset_opts = ['train', 'val', 'test']
+
+        try:
+            verify_str_arg(classes, "classes", dset_opts)
+            if classes == 'test':
+                classes = [classes]
+            else:
+                classes = [c + '_' + classes for c in categories]
+        except ValueError:
+            if not isinstance(classes, Iterable):
+                msg = ("Expected type str or Iterable for argument classes, "
+                       "but got type {}.")
+                raise ValueError(msg.format(type(classes)))
+
+            classes = list(classes)
+            msg_fmtstr = ("Expected type str for elements in argument classes, "
+                          "but got type {}.")
+            for c in classes:
+                verify_str_arg(c, custom_msg=msg_fmtstr.format(type(c)))
+                c_short = c.split('_')
+                category, dset_opt = '_'.join(c_short[:-1]), c_short[-1]
+
+                msg_fmtstr = "Unknown value '{}' for {}. Valid values are {{{}}}."
+                msg = msg_fmtstr.format(category, "LSUN class",
+                                        iterable_to_str(categories))
+                verify_str_arg(category, valid_values=categories, custom_msg=msg)
+
+                msg = msg_fmtstr.format(dset_opt, "postfix", iterable_to_str(dset_opts))
+                verify_str_arg(dset_opt, valid_values=dset_opts, custom_msg=msg)
+
+        return classes
 
     def __getitem__(self, index):
         """

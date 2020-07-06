@@ -1,5 +1,4 @@
 from PIL import Image
-from six.moves import zip
 from .utils import download_url, check_integrity
 
 import os
@@ -24,11 +23,9 @@ class SBU(VisionDataset):
     filename = "SBUCaptionedPhotoDataset.tar.gz"
     md5_checksum = '9aec147b3488753cf758b4d493422285'
 
-    def __init__(self, root, transform=None, target_transform=None,
-                 download=True):
-        super(SBU, self).__init__(root)
-        self.transform = transform
-        self.target_transform = target_transform
+    def __init__(self, root, transform=None, target_transform=None, download=True):
+        super(SBU, self).__init__(root, transform=transform,
+                                  target_transform=target_transform)
 
         if download:
             self.download()
